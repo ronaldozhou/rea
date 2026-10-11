@@ -26,7 +26,38 @@ import { RECOVERY_LIMITS } from "./WakaruRelease.js";
 
 const OPERATION = "recover_javascript_sources";
 const WAKARU_REQUIREMENT =
-  "Provide an absolute REA_WAKARU_COMMAND pointing to a Wakaru ^1.13.0 Linux x64 binary (verified with 1.14.0); no tool is installed by REA. See docs/javascript-recovery.md#install-wakaru.";
+  "Provide an absolute REA_WAKARU_COMMAND pointing to a Wakaru ^1.13.0 binary for this platform (verified with 1.14.0); no tool is installed by REA. See docs/javascript-recovery.md#install-wakaru.";
+
+/** Linux bounds Wakaru with util-linux prlimit; other POSIX hosts use the shell's ulimit, which has no address-space ceiling. */
+const usesPrlimit = () => process.platform === "linux";
+
+/** POSIX shell wrapper applying the ulimit subset available on non-Linux hosts. */
+const ULIMIT_SCRIPT =
+  'ulimit -f "$1" && ulimit -c 0 && ulimit -t 120 && shift && exec "$@"';
+
+const limiterArguments = (
+  command: string,
+  commandArguments: readonly string[],
+) =>
+  usesPrlimit()
+    ? [
+        `--as=${String(RECOVERY_LIMITS.addressSpaceBytes)}`,
+        `--fsize=${String(RECOVERY_LIMITS.outputBytes)}`,
+        "--core=0",
+        "--cpu=120",
+        "--",
+        command,
+        ...commandArguments,
+      ]
+    : [
+        "-c",
+        ULIMIT_SCRIPT,
+        "rea-wakaru-limiter",
+        // ulimit -f counts 512-byte blocks.
+        String(RECOVERY_LIMITS.outputBytes / 512),
+        command,
+        ...commandArguments,
+      ];
 
 /** Inject the owned process launcher while retaining production protocol parsing. */
 export type WakaruLauncher = (
@@ -64,8 +95,7 @@ export const resolveWakaruCommand = async (
 ) => {
   const configured = environment.REA_WAKARU_COMMAND;
   if (
-    process.platform !== "linux" ||
-    process.arch !== "x64" ||
+    process.platform === "win32" ||
     configured === undefined ||
     !isAbsolute(configured)
   )
@@ -82,8 +112,9 @@ export const resolveWakaruCommand = async (
       command,
       RECOVERY_LIMITS.outputBytes,
     );
-    const limiter =
-      environment.REA_JAVASCRIPT_PRLIMIT_COMMAND ?? "/usr/bin/prlimit";
+    const limiter = usesPrlimit()
+      ? (environment.REA_JAVASCRIPT_PRLIMIT_COMMAND ?? "/usr/bin/prlimit")
+      : "/bin/sh";
     if (!isAbsolute(limiter))
       throw new TypeError("REA_JAVASCRIPT_PRLIMIT_COMMAND must be absolute");
     await access(limiter, constants.X_OK);
@@ -91,7 +122,7 @@ export const resolveWakaruCommand = async (
       throw new TypeError(`Resource limiter is not a regular file: ${limiter}`);
     return { command, limiter, ...fingerprint };
   } catch (cause: unknown) {
-    const reason = `Configured Wakaru or util-linux prlimit is unavailable: ${recoveryFailureMessage(cause)}`;
+    const reason = `Configured Wakaru or its resource limiter is unavailable: ${recoveryFailureMessage(cause)}`;
     throw new AnalysisCapabilityUnavailableError("wakaru", OPERATION, reason, {
       cause,
       userMessage: reason,
@@ -117,15 +148,7 @@ export const runWakaruCommand = async (context: WakaruCommandContext) => {
   const runId = `rea-wakaru-${randomUUID()}`;
   const spawned = await (context.launcher ?? spawnOwnedProviderProcess)({
     command: context.limiter,
-    arguments: [
-      `--as=${String(RECOVERY_LIMITS.addressSpaceBytes)}`,
-      `--fsize=${String(RECOVERY_LIMITS.outputBytes)}`,
-      "--core=0",
-      "--cpu=120",
-      "--",
-      context.command,
-      ...context.arguments,
-    ],
+    arguments: limiterArguments(context.command, context.arguments),
     expectedCommand: null,
     runId,
     cwd: context.cwd,
@@ -138,7 +161,8 @@ export const runWakaruCommand = async (context: WakaruCommandContext) => {
     throw new ProviderAdapterError("wakaru", OPERATION, {
       cause,
       diagnostics: {
-        reason: "Failed to launch configured Wakaru through util-linux prlimit",
+        reason:
+          "Failed to launch configured Wakaru through its resource limiter",
         command: context.command,
         detail: recoveryFailureMessage(cause),
       },

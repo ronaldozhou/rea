@@ -7,7 +7,9 @@ never executes the selected or recovered application code.
 
 ## Caller-supplied engine
 
-REA accepts Wakaru **^1.13.0** on Linux x64. The report parser is verified with
+REA accepts Wakaru **^1.13.0** on Linux and macOS. Linux runs it under
+util-linux `prlimit`; macOS runs it under `/bin/sh` `ulimit` (file size, core,
+CPU time), which cannot enforce the 1 GiB address-space ceiling. The report parser is verified with
 Wakaru **1.14.0**. Another release in that range is accepted, the observed
 version is reported, and a limitation records that the parser was not verified
 against that release. Wakaru changes `--version`, `--json` and `provenance.json`
@@ -42,6 +44,8 @@ Or install it from npm. Point at the platform binary, not the Node.js shim in
 ```sh
 npm install wakaru@1.14.0
 export REA_WAKARU_COMMAND="$(realpath node_modules/@wakaru/cli-linux-x64/wakaru)"
+# macOS on Apple silicon:
+export REA_WAKARU_COMMAND="$(realpath node_modules/@wakaru/cli-darwin-arm64/wakaru)"
 ```
 
 Both give the same binary (SHA-256
